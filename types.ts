@@ -7,6 +7,7 @@ export interface SessionInfo {
   startedAt: number;
   lastActivity: number;
   status?: string;
+  kind?: string;
 }
 
 export interface Message {

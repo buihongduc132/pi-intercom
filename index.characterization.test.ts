@@ -305,11 +305,10 @@ test("A3: register with a string `kind` is accepted today (permissive extra fiel
   }
 });
 
-test("A4: register with a NON-string `kind` is ACCEPTED today (Wave 5 flips this to REJECTED)", { concurrency: false }, async () => {
+test("A4: register with a NON-string `kind` is REJECTED (validator type-checks kind)", { concurrency: false }, async () => {
   const broker = await startBroker();
   try {
-    // Today the validator does not type-check `kind` (it is an unknown extra
-    // field), so a non-string `kind` is accepted. Wave 5 will reject this.
+    // The validator now type-checks `kind`; a non-string value is rejected.
     const session = {
       cwd: "/repo/work",
       model: "m",
@@ -318,10 +317,12 @@ test("A4: register with a NON-string `kind` is ACCEPTED today (Wave 5 flips this
       lastActivity: 100,
       kind: 12345,
     } as Omit<SessionInfo, "id">;
-    const client = await connectClient(session);
-    const sessions = await client.listSessions();
-    assert.equal(sessions.length, 1);
-    await client.disconnect();
+    const client = await connectClient(session).catch(() => undefined);
+    if (client) {
+      const sessions = await client.listSessions();
+      assert.equal(sessions.length, 0, "non-string kind must be rejected");
+      await client.disconnect();
+    }
   } finally {
     await killBroker(broker);
   }
@@ -356,7 +357,7 @@ test("B1: a worker-named peer appears in the broker's list response (no filterin
 // Section C — buildRegistration does NOT read PI_TEAMS_WORKER (target #1).
 // ---------------------------------------------------------------------------
 
-test("C1: a session started with PI_TEAMS_WORKER=1 registers WITHOUT a kind field today", { concurrency: false }, async () => {
+test("C1: a session started with PI_TEAMS_WORKER=1 registers WITH kind=\"teams-worker\"", { concurrency: false }, async () => {
   const broker = await startBroker();
   const previousTeamsWorker = process.env.PI_TEAMS_WORKER;
   process.env.PI_TEAMS_WORKER = "1";
@@ -377,10 +378,8 @@ test("C1: a session started with PI_TEAMS_WORKER=1 registers WITHOUT a kind fiel
       const sessions = await observer.listSessions();
       const self = sessions.find((s) => s.name === "char-teams-self");
       assert.ok(self, "self session registered");
-      // TODAY buildRegistration ignores PI_TEAMS_WORKER -> kind is absent.
-      // (Wave 5 flips this to kind === "teams-worker".)
-      assert.equal((self as { kind?: string }).kind, undefined);
-      assert.equal("kind" in self, false, "no kind key on SessionInfo today");
+      // buildRegistration reads PI_TEAMS_WORKER and tags the session.
+      assert.equal((self as { kind?: string }).kind, "teams-worker");
     } finally {
       await harness.emitLifecycle("session_shutdown");
       await observer.disconnect();
@@ -396,7 +395,7 @@ test("C1: a session started with PI_TEAMS_WORKER=1 registers WITHOUT a kind fiel
 // Section D — formatSessionListRow (8-char id) + list handler (target #2/#3).
 // ---------------------------------------------------------------------------
 
-test("D1: list rows render the 8-char shortSessionId, NOT the full id", { concurrency: false }, async () => {
+test("D1: list rows render the FULL session id (not the 8-char truncation)", { concurrency: false }, async () => {
   const broker = await startBroker();
   try {
     const harness = createExtensionHarness("char-list-self", { hasUI: true });
@@ -409,15 +408,13 @@ test("D1: list rows render the 8-char shortSessionId, NOT the full id", { concur
       const listResult = await invokeList(intercomTool, harness.ctx);
       // The current-session row exists.
       assert.match(listResult, /\*\*Current session:\*\*/);
-      // The row shows the first 8 chars of the id in parens ...
-      const short = self.id.slice(0, 8);
-      assert.match(listResult, new RegExp(`\\(${short}\\)`));
-      // ... and does NOT show the full id (chars after the 8th never appear).
+      // The row shows the FULL id (including chars past the 8th).
+      assert.ok(listResult.includes(self.id), "full id must appear in list rows");
       const tail = self.id.slice(8);
-      assert.equal(
+      assert.ok(tail.length > 0);
+      assert.ok(
         listResult.includes(tail),
-        false,
-        "full id tail must NOT appear in list rows (shortSessionId baseline)",
+        "id tail past char 8 must appear (full id, not shortSessionId)",
       );
     } finally {
       await harness.emitLifecycle("session_shutdown");
@@ -428,7 +425,7 @@ test("D1: list rows render the 8-char shortSessionId, NOT the full id", { concur
   }
 });
 
-test("D2: list is unsorted today (broker registration order, NOT lastActivity desc)", { concurrency: false }, async () => {
+test("D2: list is sorted by lastActivity desc (most recent first)", { concurrency: false }, async () => {
   const broker = await startBroker();
   try {
     const harness = createExtensionHarness("char-sort-self", { hasUI: true });
@@ -440,9 +437,7 @@ test("D2: list is unsorted today (broker registration order, NOT lastActivity de
 
       // Register peers IN ORDER Alpha, Bravo, Charlie but with lastActivity set
       // out-of-order: Alpha=3000 (newest), Charlie=2000, Bravo=1000 (oldest).
-      // If sorted by lastActivity desc the order would be Alpha, Charlie, Bravo.
-      // Today there is NO sort, so the rendered order is registration order:
-      // Alpha, Bravo, Charlie.
+      // Sorted by lastActivity desc the order is Alpha, Charlie, Bravo.
       const alpha = await connectClient(peerRegistration({ name: "Alpha", lastActivity: 3000 }));
       const bravo = await connectClient(peerRegistration({ name: "Bravo", lastActivity: 1000 }));
       const charlie = await connectClient(peerRegistration({ name: "Charlie", lastActivity: 2000 }));
@@ -454,10 +449,9 @@ test("D2: list is unsorted today (broker registration order, NOT lastActivity de
       const charlieIdx = listResult.indexOf("Charlie");
       assert.ok(alphaIdx !== -1 && bravoIdx !== -1 && charlieIdx !== -1, "all three peers rendered");
 
-      // Registration order: Alpha < Bravo < Charlie (NOT the activity-desc order
-      // Alpha < Charlie < Bravo). This pins the "no sort" baseline.
-      assert.ok(alphaIdx < bravoIdx, `Alpha before Bravo (got alpha=${alphaIdx} bravo=${bravoIdx})`);
-      assert.ok(bravoIdx < charlieIdx, `Bravo before Charlie (got bravo=${bravoIdx} charlie=${charlieIdx})`);
+      // Activity-desc order: Alpha (3000) < Charlie (2000) < Bravo (1000).
+      assert.ok(alphaIdx < charlieIdx, `Alpha before Charlie (got alpha=${alphaIdx} charlie=${charlieIdx})`);
+      assert.ok(charlieIdx < bravoIdx, `Charlie before Bravo (got charlie=${charlieIdx} bravo=${bravoIdx})`);
 
       await alpha.disconnect();
       await bravo.disconnect();
@@ -498,7 +492,7 @@ test("D3: list shows ALL peers today, including a worker-named peer (no hide rul
   }
 });
 
-test("D4: cwd param has NO effect today (list is identical with/without it)", { concurrency: false }, async () => {
+test("D4: cwd param filters peers by exact cwd match", { concurrency: false }, async () => {
   const broker = await startBroker();
   try {
     const harness = createExtensionHarness("char-cwd-self", { hasUI: true });
@@ -513,15 +507,14 @@ test("D4: cwd param has NO effect today (list is identical with/without it)", { 
       await waitForSessionByName(observer, "in-repo-b");
 
       const withoutCwd = await invokeList(intercomTool, harness.ctx, { action: "list" });
-      // Passing cwd today is ignored by the (non-existent) handler: both peers
-      // still appear regardless of the value.
+      // cwd filter narrows to exact-match /repo/a peers only.
       const withCwd = await invokeList(intercomTool, harness.ctx, {
         action: "list",
         cwd: "/repo/a",
       } as Record<string, unknown>);
       assert.match(withCwd, /in-repo-a/);
-      assert.match(withCwd, /in-repo-b/);
-      assert.equal(withoutCwd, withCwd, "cwd param must have no effect today");
+      assert.equal(/in-repo-b/.test(withCwd), false, "cwd filter must exclude non-matching peers");
+      assert.notEqual(withoutCwd, withCwd, "cwd param must change the list output");
     } finally {
       await harness.emitLifecycle("session_shutdown");
       await observer.disconnect();
@@ -563,14 +556,14 @@ test("D5: all param has NO effect today (list is identical with/without it)", { 
   }
 });
 
-test("D6: the intercom tool schema does NOT declare cwd or all params today", async () => {
+test("D6: the intercom tool schema declares cwd and all params", async () => {
   const harness = createExtensionHarness("char-schema-self");
   const intercomTool = await loadExtension(harness);
   const properties = (intercomTool.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
   assert.ok(properties, "tool parameters schema has a properties object");
-  // Wave 5 adds cwd + all. Today they are absent from the declared schema.
-  assert.equal("cwd" in properties, false, "cwd must not be declared today");
-  assert.equal("all" in properties, false, "all must not be declared today");
+  // cwd + all are now declared in the schema.
+  assert.equal("cwd" in properties, true, "cwd must be declared");
+  assert.equal("all" in properties, true, "all must be declared");
   // The baseline set of params.
   assert.ok("action" in properties);
   assert.ok("to" in properties);

@@ -394,7 +394,7 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model})${suffix}`;
+  return `• ${name} (${session.id}) — ${session.cwd} (${session.model})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -539,7 +539,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
 
     const identity = buildPresenceIdentity(pi, currentSessionId);
-    return {
+    const registration: Omit<SessionInfo, "id"> = {
       name: identity.name,
       cwd: liveContext.cwd ?? process.cwd(),
       model: currentModel,
@@ -548,6 +548,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       lastActivity: Date.now(),
       status: currentStatus(),
     };
+    if (process.env.PI_TEAMS_WORKER === "1") {
+      registration.kind = "teams-worker";
+    }
+    return registration;
   }
   function syncPresenceIdentity(sessionId: string): void {
     if (!client || !getLiveContext()) {
@@ -1337,6 +1341,12 @@ Usage:
       replyTo: Type.Optional(Type.String({
         description: "Message ID to reply to (for threading or responding to an 'ask')",
       })),
+      cwd: Type.Optional(Type.String({
+        description: "Filter sessions by exact cwd match (for 'list' action)",
+      })),
+      all: Type.Optional(Type.Boolean({
+        description: "Show all sessions including background-role workers (for 'list' action)",
+      })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1353,7 +1363,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo } = params;
+      const { action, to, message, attachments, replyTo, cwd, all } = params;
 
       switch (action) {
         case "list": {
@@ -1361,7 +1371,7 @@ Usage:
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
             const currentSession = sessions.find(s => s.id === mySessionId);
-            const otherSessions = sessions.filter(s => s.id !== mySessionId);
+            let otherSessions = sessions.filter(s => s.id !== mySessionId);
 
             if (!currentSession) {
               return {
@@ -1370,6 +1380,17 @@ Usage:
                 details: { error: true },
               };
             }
+
+            // D2: hide background-role (kind-set) sessions unless all=true (display-only filter).
+            if (!all) {
+              otherSessions = otherSessions.filter(s => !s.kind);
+            }
+            // D5: optional cwd filter narrows to exact-match peers.
+            if (cwd) {
+              otherSessions = otherSessions.filter(s => s.cwd === cwd);
+            }
+            // D3: sort by lastActivity descending (most recent first).
+            otherSessions = otherSessions.slice().sort((a, b) => b.lastActivity - a.lastActivity);
 
             const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true)}`;
             const otherSection = otherSessions.length === 0
@@ -1727,7 +1748,7 @@ Usage:
       }
       currentSession = foundCurrentSession;
       duplicates = duplicateSessionNames(allSessions);
-      sessions = allSessions.filter(s => s.id !== mySessionId);
+      sessions = allSessions.filter(s => s.id !== mySessionId && !s.kind);
     } catch (error) {
       notifyIfLive(ctx, `Failed to list sessions: ${getErrorMessage(error)}`, "error", overlayGeneration);
       return;

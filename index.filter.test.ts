@@ -590,8 +590,50 @@ test("R6: a worker hidden from the list still receives a send by id", { concurre
 });
 
 // ---------------------------------------------------------------------------
-// R7 — D3: list is sorted by lastActivity descending (most recent first).
+// R6b — D2 (name path): a worker hidden from the list still receives a send by NAME.
+// The impact analysis flagged the display-only invariant as HIGH-risk. R6 proved the
+// id path; this proves the name path (resolveSessionTarget + broker findSessions
+// both unfiltered). Together they close the coverage gap noted by the verifier.
 // ---------------------------------------------------------------------------
+
+test("R6b: a worker hidden from the list still receives a send by name", { concurrency: false }, async () => {
+  const broker = await startBroker();
+  try {
+    const harness = createExtensionHarness("red-deliver-name-self", { hasUI: true });
+    const intercomTool = await loadExtension(harness);
+    const observer = await connectClient(peerRegistration({ name: "observer", lastActivity: 0 }));
+    try {
+      await harness.emitLifecycle("session_start");
+      await waitForSessionByName(observer, "red-deliver-name-self");
+
+      const worker = await connectClient(workerRegistration({ name: "deliver-name-worker", lastActivity: 2 }));
+      await waitForSessionByName(observer, "deliver-name-worker");
+
+      // Step 1 (D2): the worker is hidden from the default list.
+      const defaultList = await invokeList(intercomTool, harness.ctx);
+      assert.equal(
+        /deliver-name-worker/.test(defaultList),
+        false,
+        "precondition: worker must be hidden from the list",
+      );
+
+      // Step 2 (D2, CRITICAL): despite being hidden, a message addressed by NAME is delivered.
+      const received = waitForMessage(worker, (message) => message.content.text === "ping-by-name");
+      const delivered = await observer.send("deliver-name-worker", { text: "ping-by-name" });
+      assert.equal(delivered.delivered, true, "send to a hidden worker by name must be accepted by the broker");
+      const { from, message } = await received;
+      assert.equal(message.content.text, "ping-by-name");
+      assert.equal(from.name, "observer", "message should be delivered from the named sender");
+
+      await worker.disconnect();
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await observer.disconnect();
+    }
+  } finally {
+    await killBroker(broker);
+  }
+});
 
 test("R7: 'Other sessions' are sorted by lastActivity desc (most recent first)", { concurrency: false }, async () => {
   const broker = await startBroker();

@@ -599,8 +599,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         ? { triggerTurn: true }
         : { deliverAs: "followUp" }
     ) as unknown;
-    if (result && typeof (result as Promise<void>).then === "function") {
-      (result as Promise<void>).catch(() => {
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      // Wrap in Promise.resolve() so a thenable that only implements .then()
+      // (not .catch()) is standardized — avoids any TypeError that would defeat
+      // this crash-guard.
+      Promise.resolve(result as Promise<void>).catch(() => {
         // Intentionally swallowed: inbound message delivery is best-effort.
       });
     }

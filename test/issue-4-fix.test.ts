@@ -59,29 +59,12 @@ async function spawnBroker(): Promise<ChildProcessWithoutNullStreams> {
 }
 
 test("issue #4: a rejecting pi.sendMessage does not surface as an unhandled rejection", async () => {
+  // ExtensionAPI.sendMessage is typed `void` in the real host and returns
+  // undefined (the SDK self-swallows internally). Some hosts/contexts may return
+  // a thenable. The guard in sendIncomingMessage must NEVER throw a TypeError by
+  // calling .catch() on undefined, AND must swallow a rejection when a thenable
+  // IS returned. Cover both shapes.
   const { default: piIntercomExtension } = await import("../index.ts");
-
-  const events = new EventEmitter();
-  const sendError = new Error("boom from sendMessage");
-  const pi = {
-    getSessionName: () => "orchestrator",
-    events: {
-      on: (channel: string, handler: (payload: unknown) => void) => {
-        events.on(channel, handler);
-        return () => events.off(channel, handler);
-      },
-      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
-    },
-    on: () => undefined,
-    registerMessageRenderer: () => undefined,
-    registerTool: () => undefined,
-    registerCommand: () => undefined,
-    registerShortcut: () => undefined,
-    // The real ExtensionAPI.sendMessage returns Promise<void>. Make the mock match
-    // reality so the .catch() chain in sendIncomingMessage is exercised.
-    sendMessage: () => Promise.reject(sendError),
-    appendEntry: () => undefined,
-  };
 
   const rejections: unknown[] = [];
   const onUnhandledRejection = (reason: unknown) => {
@@ -89,19 +72,46 @@ test("issue #4: a rejecting pi.sendMessage does not surface as an unhandled reje
   };
   process.on("unhandledRejection", onUnhandledRejection);
 
-  try {
-    piIntercomExtension(pi as never);
+  const runOnce = async (sendMessageImpl: () => unknown): Promise<void> => {
+    const events = new EventEmitter();
+    const pi = {
+      getSessionName: () => "orchestrator",
+      events: {
+        on: (channel: string, handler: (payload: unknown) => void) => {
+          events.on(channel, handler);
+          return () => events.off(channel, handler);
+        },
+        emit: (channel: string, payload: unknown) => events.emit(channel, payload),
+      },
+      on: () => undefined,
+      registerMessageRenderer: () => undefined,
+      registerTool: () => undefined,
+      registerCommand: () => undefined,
+      registerShortcut: () => undefined,
+      sendMessage: sendMessageImpl,
+      appendEntry: () => undefined,
+    };
 
+    piIntercomExtension(pi as never);
     // The subagent:control-intercom seam drives deliverLocalSubagentRelayMessage
     // -> sendIncomingMessage -> pi.sendMessage when the target is the current session.
-    pi.events.emit("subagent:control-intercom", {
+    events.emit("subagent:control-intercom", {
       to: "orchestrator",
       message: "subagent needs attention",
     });
-
     // Allow the async relay path and any microtask rejection to settle.
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setTimeout(resolve, 20));
+  };
+
+  try {
+    // Shape A — the REAL host: sendMessage returns undefined (void). A naive
+    // `pi.sendMessage(...).catch()` would throw TypeError here.
+    await runOnce(() => undefined);
+    // Shape B — a host that returns a rejecting thenable. The guard must swallow
+    // it so no unhandledRejection reaches the host.
+    const sendError = new Error("boom from sendMessage");
+    await runOnce(() => Promise.reject(sendError));
 
     assert.equal(
       rejections.length,

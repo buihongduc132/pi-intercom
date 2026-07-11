@@ -583,9 +583,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
-    // Best-effort delivery: swallow rejections so a failing sendMessage never
-    // surfaces as an unhandled rejection that crashes the host session.
-    (pi.sendMessage(
+    // Best-effort delivery: guard against a rejection surfacing as an unhandled
+    // rejection that crashes the host session. ExtensionAPI.sendMessage is typed
+    // `void` and the real host self-swallows internally, but older/newer hosts
+    // may return a thenable — chain .catch() defensively only when it does, so
+    // we never throw a TypeError by calling .catch() on undefined.
+    const result = pi.sendMessage(
       {
         customType: "intercom_message",
         content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n${entry.bodyText}`,
@@ -595,9 +598,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       delivery === "trigger"
         ? { triggerTurn: true }
         : { deliverAs: "followUp" }
-    ) as unknown as Promise<void>).catch(() => {
-      // Intentionally swallowed: inbound message delivery is best-effort.
-    });
+    ) as unknown;
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).catch(() => {
+        // Intentionally swallowed: inbound message delivery is best-effort.
+      });
+    }
   }
   function scheduleInboundFlush(delayMs = INBOUND_FLUSH_DELAY_MS): void {
     if (!getLiveContext()) {

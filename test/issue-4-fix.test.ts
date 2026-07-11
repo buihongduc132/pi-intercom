@@ -139,3 +139,103 @@ test("issue #4: IntercomClient.destroy() tears down the socket synchronously", {
     await once(broker, "exit").catch(() => undefined);
   }
 });
+
+test("issue #4: the extension 'error' handler destroys the live client socket", { concurrency: false }, async () => {
+  const broker = await spawnBroker();
+  // Capture the real client instance the extension creates, and spy on its
+  // destroy() so we can prove the index.ts 'error' handler routes through it.
+  // (If the handler were still empty, destroy would never be called from the
+  // error path and this test fails — that is the RED the goal requires.)
+  let liveClient: InstanceType<typeof IntercomClient> | null = null;
+  let destroyCalls = 0;
+  const proto = IntercomClient.prototype;
+  const realDestroy = proto.destroy;
+  proto.destroy = function (this: InstanceType<typeof IntercomClient>) {
+    destroyCalls += 1;
+    return realDestroy.call(this);
+  };
+  // Capture each new client instance so we can emit "error" on the live one.
+  const originalNew = proto.constructor;
+  const instrumentConnect = proto.connect;
+  proto.connect = async function (this: InstanceType<typeof IntercomClient>, ...args: Parameters<typeof instrumentConnect>) {
+    liveClient = this;
+    return instrumentConnect.apply(this, args);
+  } as typeof instrumentConnect;
+  void originalNew;
+
+  let harness: { emitLifecycle: (e: string) => Promise<void> } | null = null;
+  try {
+    const events = new EventEmitter();
+    const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+    const pi = {
+      getSessionName: () => "error-handler-worker",
+      events: {
+        on: (channel: string, handler: (payload: unknown) => void) => { events.on(channel, handler); return () => events.off(channel, handler); },
+        emit: (channel: string, payload: unknown) => events.emit(channel, payload),
+      },
+      on: (event: string, handler: (payload: unknown, ctx: unknown) => unknown) => {
+        const handlers = lifecycleHandlers.get(event) ?? [];
+        handlers.push(handler);
+        lifecycleHandlers.set(event, handlers);
+      },
+      registerMessageRenderer: () => undefined,
+      registerTool: () => undefined,
+      registerCommand: () => undefined,
+      registerShortcut: () => undefined,
+      sendMessage: () => Promise.resolve(),
+      appendEntry: () => undefined,
+    };
+    const ctx = {
+      cwd: repoDir,
+      model: { id: "test-model" },
+      sessionManager: { getSessionId: () => "session-error-handler-test" },
+      isIdle: () => true,
+      hasUI: false,
+      abort: () => undefined,
+      ui: undefined,
+    };
+    harness = {
+      emitLifecycle: async (event: string) => {
+        for (const handler of lifecycleHandlers.get(event) ?? []) {
+          await handler({}, ctx);
+        }
+      },
+    };
+
+    const { default: piIntercomExtension } = await import("../index.ts");
+    piIntercomExtension(pi as never);
+
+    // session_start triggers ensureConnected("startup"), which creates and
+    // connects the live IntercomClient and registers the error handler.
+    await harness.emitLifecycle("session_start");
+
+    // Wait for the background connect to settle on the live client.
+    const deadline = Date.now() + 5000;
+    while ((!liveClient || !liveClient.isConnected()) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(liveClient, "expected the extension to create a live client");
+    assert.equal(liveClient.isConnected(), true, "expected the live client to connect");
+
+    const callsBefore = destroyCalls;
+    // Emit the same "error" event the socket-level handlers forward
+    // (onSocketError / onReaderError) to IntercomClient consumers.
+    liveClient.emit("error", new Error("simulated socket error"));
+
+    // Give the synchronous destroy() call in the handler one tick.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.ok(
+      destroyCalls > callsBefore,
+      "expected the extension 'error' handler to call destroy() on the live client",
+    );
+    assert.equal(liveClient.isConnected(), false, "expected the socket to be torn down after the error handler ran");
+  } finally {
+    // Restore the prototype and shut down.
+    proto.destroy = realDestroy;
+    proto.connect = instrumentConnect;
+    void harness;
+    broker.kill("SIGTERM");
+    await once(broker, "exit").catch(() => undefined);
+  }
+});

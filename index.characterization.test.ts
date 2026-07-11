@@ -79,17 +79,22 @@ async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promi
 }
 
 async function startBroker(): Promise<ChildProcessWithoutNullStreams> {
+  // detached:true puts the broker tree in its OWN process group (pgid == broker.pid).
+  // This lets killBroker() SIGKILL the whole tree (npx -> sh -> node/tsx loader ->
+  // real broker node) so no grandchild survives to hold the stdout/stderr pipe
+  // write-ends open — which would otherwise keep the test runner's event loop
+  // alive and prevent node:test from ever printing its summary / exiting.
   const broker = spawn("npx", ["--no-install", "tsx", path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
   try {
     await waitForBrokerReady(broker);
     return broker;
   } catch (error) {
-    broker.kill("SIGTERM");
-    await once(broker, "exit").catch(() => undefined);
+    await killBrokerTree(broker);
     throw error;
   }
 }
@@ -100,9 +105,24 @@ async function connectClient(session: Omit<SessionInfo, "id">): Promise<Instance
   return client;
 }
 
-async function killBroker(broker: ChildProcessWithoutNullStreams): Promise<void> {
-  broker.kill("SIGTERM");
+// Kill the ENTIRE broker process group (npx + sh + tsx loader + real broker).
+// broker.kill("SIGTERM") alone only signals the direct `npx` child; its spawned
+// `node`/`tsx` descendants get reparented to init and keep running, pinning the
+// inherited stdio pipes open. A process-group SIGKILL guarantees the whole tree
+// dies and releases every inherited handle so the test runner can exit cleanly.
+async function killBrokerTree(broker: ChildProcessWithoutNullStreams): Promise<void> {
+  try {
+    process.kill(-broker.pid, "SIGKILL");
+  } catch {
+    // Group may already be gone, or detached group not established; fall back to
+    // signalling the direct child then escalating.
+    broker.kill("SIGTERM");
+  }
   await once(broker, "exit").catch(() => undefined);
+}
+
+async function killBroker(broker: ChildProcessWithoutNullStreams): Promise<void> {
+  await killBrokerTree(broker);
 }
 
 async function waitForSessionByName(

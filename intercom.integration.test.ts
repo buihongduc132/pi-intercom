@@ -158,6 +158,7 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     registerShortcut: () => undefined,
     sendMessage: (message: { customType?: string; content?: string; details?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
       sentMessages.push({ message, options });
+      return Promise.resolve();
     },
     appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
   };
@@ -873,6 +874,7 @@ test("subagent control intercom events wake the current orchestrator session", a
     registerShortcut: () => undefined,
     sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean }) => {
       sentMessages.push({ message, options });
+      return Promise.resolve();
     },
     appendEntry: () => undefined,
   };
@@ -913,6 +915,7 @@ test("subagent result intercom events wake the current orchestrator session", as
     registerShortcut: () => undefined,
     sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean }) => {
       sentMessages.push({ message, options });
+      return Promise.resolve();
     },
     appendEntry: () => undefined,
   };

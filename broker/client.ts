@@ -132,6 +132,23 @@ export class IntercomClient extends EventEmitter {
     return Boolean(socket && this._sessionId && !this.disconnecting && !socket.destroyed && !socket.writableEnded && socket.writable);
   }
 
+  /**
+   * Synchronously destroy the underlying socket. Idempotent.
+   *
+   * Unlike disconnect(), this skips the graceful unregister handshake and tears
+   * the socket down immediately. Used by socket-level error handlers to release
+   * the file descriptor without awaiting a close that may never arrive.
+   */
+  destroy(): void {
+    const socket = this.socket;
+    if (!socket) {
+      return;
+    }
+    this.socket = null;
+    this._sessionId = null;
+    socket.destroy();
+  }
+
   private requireActiveSocket(): net.Socket {
     if (this.disconnecting) {
       throw new Error("Client disconnecting");

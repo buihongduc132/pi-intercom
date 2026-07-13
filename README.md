@@ -336,7 +336,11 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, full session ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
+
+  Optional filters:
+  - `cwd` — Narrow "Other sessions" to peers whose working directory is an exact match (e.g. `cwd: "/repo/a"`).
+  - `all` — Reveal background-role sessions that are hidden by default. Sessions spawned by teams workers (`PI_TEAMS_WORKER=1`) set `kind: "teams-worker"` and are excluded from the default list and the Alt+M overlay picker to reduce noise; pass `all: true` to include them. Hidden workers remain fully addressable by id or name (the filter is display-only). "Other sessions" are sorted by `lastActivity` descending (most recent first).
 
 **`send`** — Sends a message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation.
 
@@ -352,7 +356,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 | Key | Action |
 |-----|--------|
-| Alt+M | Open session list overlay |
+| Alt+M | Open session list overlay (background-role workers are hidden from the picker) |
 | ↑/↓ | Navigate session list |
 | Enter | Select session / Send message |
 | Escape | Cancel / Close overlay |

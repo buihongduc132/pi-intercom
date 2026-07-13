@@ -91,6 +91,10 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
     return false;
   }
 
+  if (session.kind !== undefined && typeof session.kind !== "string") {
+    return false;
+  }
+
   return session.status === undefined || typeof session.status === "string";
 }
 

@@ -587,7 +587,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
-    pi.sendMessage(
+    // Best-effort delivery: guard against a rejection surfacing as an unhandled
+    // rejection that crashes the host session. ExtensionAPI.sendMessage is typed
+    // `void` and the real host self-swallows internally, but older/newer hosts
+    // may return a thenable — chain .catch() defensively only when it does, so
+    // we never throw a TypeError by calling .catch() on undefined.
+    const result = pi.sendMessage(
       {
         customType: "intercom_message",
         content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n${entry.bodyText}`,
@@ -597,7 +602,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       delivery === "trigger"
         ? { triggerTurn: true }
         : { deliverAs: "followUp" }
-    );
+    ) as unknown;
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      // Wrap in Promise.resolve() so a thenable that only implements .then()
+      // (not .catch()) is standardized — avoids any TypeError that would defeat
+      // this crash-guard.
+      Promise.resolve(result as Promise<void>).catch(() => {
+        // Intentionally swallowed: inbound message delivery is best-effort.
+      });
+    }
   }
   function scheduleInboundFlush(delayMs = INBOUND_FLUSH_DELAY_MS): void {
     if (!getLiveContext()) {
@@ -717,6 +730,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
     nextClient.on("error", () => {
       // Keep broker/socket noise out of the TUI. Reconnect logic runs from the disconnect path.
+      // Release the socket file descriptor; the close/disconnect path handles reconnect.
+      nextClient.destroy();
     });
   }
   function scheduleReconnect(): void {

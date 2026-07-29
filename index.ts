@@ -556,6 +556,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
       status: currentStatus(),
+      protocolVersion: 1,
     };
   }
   function syncPresenceIdentity(sessionId: string): void {

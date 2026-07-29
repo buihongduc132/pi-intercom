@@ -804,6 +804,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (byId) {
       return byId.id;
     }
+
+    // Prefix ID match: try after exact match, before name match
+    if (nameOrId.length >= 4) {
+      const byPrefix = sessions.filter(s => s.id.startsWith(nameOrId));
+      if (byPrefix.length > 1) {
+        throw new Error(`Ambiguous session prefix "${nameOrId}": matches ${byPrefix.length} sessions. Use more characters or the full ID.`);
+      }
+      if (byPrefix.length === 1) {
+        return byPrefix[0]!.id;
+      }
+    }
+
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
     if (byName.length > 1) {

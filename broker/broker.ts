@@ -306,6 +306,19 @@ class IntercomBroker {
       return [byId];
     }
 
+    // Prefix ID match: try after exact match, before name match
+    if (nameOrId.length >= 4) {
+      const prefixMatches = Array.from(this.sessions.values()).filter(session =>
+        session.info.id.startsWith(nameOrId)
+      );
+      if (prefixMatches.length > 1) {
+        throw new Error(`Ambiguous session prefix "${nameOrId}": matches ${prefixMatches.length} sessions. Use more characters or the full ID.`);
+      }
+      if (prefixMatches.length === 1) {
+        return prefixMatches;
+      }
+    }
+
     const lowerName = nameOrId.toLowerCase();
     return Array.from(this.sessions.values()).filter(session => session.info.name?.toLowerCase() === lowerName);
   }

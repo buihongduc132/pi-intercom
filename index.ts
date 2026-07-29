@@ -1351,7 +1351,7 @@ Usage:
 
     parameters: Type.Object({
       action: Type.String({
-        description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
+        description: "Action: 'list', 'send', 'ask', 'ask_many', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
         description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply')",
@@ -1367,6 +1367,9 @@ Usage:
       }))),
       replyTo: Type.Optional(Type.String({
         description: "Message ID to reply to (for threading or responding to an 'ask')",
+      })),
+      targets: Type.Optional(Type.Array(Type.String(), {
+        description: "Target session names or IDs (for 'ask_many' scatter-gather)",
       })),
     }),
 
@@ -1675,6 +1678,92 @@ Usage:
               details: { error: true },
             };
           }
+        }
+
+        case "ask_many": {
+          const targets = params.targets;
+          if (!Array.isArray(targets) || targets.length === 0) {
+            return {
+              content: [{ type: "text", text: "Missing 'targets' parameter (must be a non-empty array)" }],
+              isError: true,
+              details: { error: true },
+            };
+          }
+          if (!message) {
+            return {
+              content: [{ type: "text", text: "Missing 'message' parameter" }],
+              isError: true,
+              details: { error: true },
+            };
+          }
+
+          const ASK_MANY_PER_TARGET_TIMEOUT_MS = 5 * 60 * 1000;
+          const replies: Array<{ from: string; text: string; timedOut: boolean }> = [];
+
+          const results = await Promise.allSettled(targets.map(async (target) => {
+            const sendTo = await resolveSessionTarget(connectedClient, target) ?? target;
+            if (sendTo === connectedClient.sessionId) {
+              return { from: target, text: "", timedOut: false, skipped: true, reason: "Cannot message the current session" };
+            }
+            const questionId = randomUUID();
+            const replyPromise = waitForReply(sendTo, questionId, _signal);
+            const sendResult = await connectedClient.send(sendTo, {
+              messageId: questionId,
+              text: message,
+              attachments,
+              expectsReply: true,
+            });
+            if (!sendResult.delivered) {
+              rejectReplyWaiter(questionId, new Error(sendResult.reason ?? "Delivery failed"));
+              return { from: target, text: sendResult.reason ?? "Delivery failed", timedOut: false, skipped: true };
+            }
+            try {
+              const timeoutPromise = new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error("__timedOut__")), ASK_MANY_PER_TARGET_TIMEOUT_MS);
+              });
+              const replyMessage = await Promise.race([replyPromise, timeoutPromise]);
+              return { from: target, text: replyMessage.content.text, timedOut: false };
+            } catch (err) {
+              if (err instanceof Error && err.message === "__timedOut__") {
+                rejectReplyWaiter(questionId, new Error("Timed out"));
+                return { from: target, text: "", timedOut: true };
+              }
+              rejectReplyWaiter(questionId, toError(err));
+              throw err;
+            }
+          }));
+
+          for (let i = 0; i < results.length; i++) {
+            const result = results[i];
+            if (result.status === "fulfilled") {
+              if (!result.value.skipped) {
+                replies.push({ from: targets[i], text: result.value.text, timedOut: result.value.timedOut });
+              } else {
+                replies.push({ from: targets[i], text: result.value.reason ?? result.value.text, timedOut: false });
+              }
+            } else {
+              replies.push({ from: targets[i], text: getErrorMessage(result.reason), timedOut: false });
+            }
+          }
+
+          const replyLines = replies.map(r => {
+            if (r.timedOut) return `- ${r.from}: ⏱ timed out`;
+            if (!r.text) return `- ${r.from}: ✗ ${r.text || "no reply"}`;
+            return `- ${r.from}: ${r.text}`;
+          });
+
+          pi.appendEntry("intercom_ask_many", {
+            targets,
+            message: { text: message },
+            replies,
+            timestamp: Date.now(),
+          });
+
+          return {
+            content: [{ type: "text", text: `**ask_many replies:**\n${replyLines.join("\n")}` }],
+            isError: false,
+            details: { replies },
+          };
         }
 
         default:

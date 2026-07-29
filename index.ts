@@ -430,36 +430,34 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   const replyTracker = new ReplyTracker();
   const pendingIdleMessages: InboundMessageEntry[] = [];
   let inboundFlushTimer: NodeJS.Timeout | null = null;
-  let replyWaiter: {
+  const replyWaiters = new Map<string, {
     from: string;
     replyTo: string;
     resolve: (message: Message) => void;
     reject: (error: Error) => void;
-  } | null = null;
+  }>();
   function waitForReply(from: string, replyTo: string, signal?: AbortSignal): Promise<Message> {
-    if (replyWaiter) {
-      return Promise.reject(new Error("Already waiting for a reply"));
+    if (replyWaiters.has(replyTo)) {
+      return Promise.reject(new Error(`Already waiting for a reply to ${replyTo}`));
     }
     if (signal?.aborted) {
       return Promise.reject(new Error("Cancelled"));
     }
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        rejectReplyWaiter(new Error(`No reply from "${from}" within 60 minutes`));
+        rejectReplyWaiter(replyTo, new Error(`No reply from "${from}" within 60 minutes`));
       }, 60 * 60 * 1000);
       const cleanup = () => {
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
-        if (replyWaiter?.replyTo === replyTo) {
-          replyWaiter = null;
-        }
+        replyWaiters.delete(replyTo);
       };
       const onAbort = () => {
         cleanup();
         reject(new Error("Cancelled"));
       };
       signal?.addEventListener("abort", onAbort, { once: true });
-      replyWaiter = {
+      replyWaiters.set(replyTo, {
         from,
         replyTo,
         resolve: (message) => {
@@ -470,11 +468,22 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           cleanup();
           reject(error);
         },
-      };
+      });
     });
   }
-  function rejectReplyWaiter(error: Error): void {
-    replyWaiter?.reject(error);
+  function rejectReplyWaiter(replyToOrError: string | Error, error?: Error): void {
+    if (error === undefined) {
+      // Reject all waiters (used by disconnect/shutdown)
+      const rejectAll = replyToOrError as Error;
+      for (const waiter of replyWaiters.values()) {
+        waiter.reject(rejectAll);
+      }
+      replyWaiters.clear();
+    } else {
+      // Reject specific waiter
+      const waiter = replyWaiters.get(replyToOrError as string);
+      waiter?.reject(error);
+    }
   }
   function clearReconnectTimer(): void {
     if (!reconnectTimer) {
@@ -547,6 +556,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
       status: currentStatus(),
+      protocolVersion: 1,
     };
   }
   function syncPresenceIdentity(sessionId: string): void {
@@ -655,14 +665,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!liveContext) {
       return;
     }
-    if (replyWaiter) {
-      const senderTarget = from.name || from.id;
-      const fromMatches = senderTarget.toLowerCase() === replyWaiter.from.toLowerCase()
-        || from.id === replyWaiter.from;
-      const replyMatches = message.replyTo === replyWaiter.replyTo;
-      if (fromMatches && replyMatches) {
-        replyWaiter.resolve(message);
-        return;
+    if (message.replyTo) {
+      const waiter = replyWaiters.get(message.replyTo);
+      if (waiter) {
+        const senderTarget = from.name || from.id;
+        const fromMatches = senderTarget.toLowerCase() === waiter.from.toLowerCase()
+          || from.id === waiter.from;
+        if (fromMatches) {
+          waiter.resolve(message);
+          return;
+        }
       }
     }
     const attachmentText = message.content.attachments?.length
@@ -804,6 +816,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (byId) {
       return byId.id;
     }
+
+    // Prefix ID match: try after exact match, before name match
+    if (nameOrId.length >= 4) {
+      const byPrefix = sessions.filter(s => s.id.startsWith(nameOrId));
+      if (byPrefix.length > 1) {
+        throw new Error(`Ambiguous session prefix "${nameOrId}": matches ${byPrefix.length} sessions. Use more characters or the full ID.`);
+      }
+      if (byPrefix.length === 1) {
+        return byPrefix[0]!.id;
+      }
+    }
+
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
     if (byName.length > 1) {
@@ -1184,21 +1208,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           }
         }
 
-        if (replyWaiter) {
-          return {
-            content: [{ type: "text", text: "Already waiting for a reply" }],
-            isError: true,
-            details: { error: true },
-          };
-        }
-
         let replyPromise: Promise<Message> | null = null;
+        let questionId: string;
         try {
-          const questionId = randomUUID();
+          questionId = randomUUID();
           replyPromise = waitForReply(sendTo, questionId, signal);
           replyPromise.catch(() => undefined);
           if (signal?.aborted) {
-            rejectReplyWaiter(new Error("Cancelled"));
+            rejectReplyWaiter(questionId, new Error("Cancelled"));
             try {
               await replyPromise;
             } catch {
@@ -1220,7 +1237,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           });
           if (!sendResult.delivered) {
             const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-            rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
+            rejectReplyWaiter(questionId, new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
             if (replyPromise) {
               try {
                 await replyPromise;
@@ -1266,7 +1283,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               : {}),
           };
         } catch (error) {
-          rejectReplyWaiter(toError(error));
+          if (questionId!) rejectReplyWaiter(questionId!, toError(error));
           if (replyPromise) {
             try {
               await replyPromise;
@@ -1335,7 +1352,7 @@ Usage:
 
     parameters: Type.Object({
       action: Type.String({
-        description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
+        description: "Action: 'list', 'send', 'ask', 'ask_many', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
         description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply')",
@@ -1351,6 +1368,12 @@ Usage:
       }))),
       replyTo: Type.Optional(Type.String({
         description: "Message ID to reply to (for threading or responding to an 'ask')",
+      })),
+      targets: Type.Optional(Type.Array(Type.String(), {
+        description: "Target session names or IDs (for 'ask_many' scatter-gather)",
+      })),
+      expectsReply: Type.Optional(Type.Boolean({
+        description: "When true on 'send', marks message as expecting a reply (visible in receiver's pending list)",
       })),
     }),
 
@@ -1368,7 +1391,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo } = params;
+      const { action, to, message, attachments, replyTo, expectsReply } = params;
 
       switch (action) {
         case "list": {
@@ -1438,6 +1461,7 @@ Usage:
               text: message,
               attachments,
               replyTo,
+              expectsReply: expectsReply === true ? true : undefined,
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
@@ -1479,14 +1503,6 @@ Usage:
             };
           }
 
-          if (replyWaiter) {
-            return {
-              content: [{ type: "text", text: "Already waiting for a reply" }],
-              isError: true,
-              details: { error: true },
-            };
-          }
-
           if (_signal?.aborted) {
             return {
               content: [{ type: "text", text: "Cancelled" }],
@@ -1495,6 +1511,7 @@ Usage:
             };
           }
           let replyPromise: Promise<Message> | null = null;
+          let questionId: string;
 
           try {
             const sendTo = await resolveSessionTarget(connectedClient, to) ?? to;
@@ -1512,7 +1529,7 @@ Usage:
                 details: { error: true },
               };
             }
-            const questionId = randomUUID();
+            questionId = randomUUID();
             replyPromise = waitForReply(sendTo, questionId, _signal);
             const sendResult = await connectedClient.send(sendTo, {
               messageId: questionId,
@@ -1524,7 +1541,7 @@ Usage:
 
             if (!sendResult.delivered) {
               const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
+              rejectReplyWaiter(questionId, new Error(`Message to "${to}" was not delivered: ${errorText}`));
               if (replyPromise) {
                 try {
                   await replyPromise;
@@ -1560,7 +1577,7 @@ Usage:
               isError: false,
             };
           } catch (error) {
-            rejectReplyWaiter(toError(error));
+            if (questionId!) rejectReplyWaiter(questionId!, toError(error));
             if (replyPromise) {
               try {
                 await replyPromise;
@@ -1666,6 +1683,92 @@ Usage:
               details: { error: true },
             };
           }
+        }
+
+        case "ask_many": {
+          const targets = params.targets;
+          if (!Array.isArray(targets) || targets.length === 0) {
+            return {
+              content: [{ type: "text", text: "Missing 'targets' parameter (must be a non-empty array)" }],
+              isError: true,
+              details: { error: true },
+            };
+          }
+          if (!message) {
+            return {
+              content: [{ type: "text", text: "Missing 'message' parameter" }],
+              isError: true,
+              details: { error: true },
+            };
+          }
+
+          const ASK_MANY_PER_TARGET_TIMEOUT_MS = 5 * 60 * 1000;
+          const replies: Array<{ from: string; text: string; timedOut: boolean }> = [];
+
+          const results = await Promise.allSettled(targets.map(async (target) => {
+            const sendTo = await resolveSessionTarget(connectedClient, target) ?? target;
+            if (sendTo === connectedClient.sessionId) {
+              return { from: target, text: "", timedOut: false, skipped: true, reason: "Cannot message the current session" };
+            }
+            const questionId = randomUUID();
+            const replyPromise = waitForReply(sendTo, questionId, _signal);
+            const sendResult = await connectedClient.send(sendTo, {
+              messageId: questionId,
+              text: message,
+              attachments,
+              expectsReply: true,
+            });
+            if (!sendResult.delivered) {
+              rejectReplyWaiter(questionId, new Error(sendResult.reason ?? "Delivery failed"));
+              return { from: target, text: sendResult.reason ?? "Delivery failed", timedOut: false, skipped: true };
+            }
+            try {
+              const timeoutPromise = new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error("__timedOut__")), ASK_MANY_PER_TARGET_TIMEOUT_MS);
+              });
+              const replyMessage = await Promise.race([replyPromise, timeoutPromise]);
+              return { from: target, text: replyMessage.content.text, timedOut: false };
+            } catch (err) {
+              if (err instanceof Error && err.message === "__timedOut__") {
+                rejectReplyWaiter(questionId, new Error("Timed out"));
+                return { from: target, text: "", timedOut: true };
+              }
+              rejectReplyWaiter(questionId, toError(err));
+              throw err;
+            }
+          }));
+
+          for (let i = 0; i < results.length; i++) {
+            const result = results[i];
+            if (result.status === "fulfilled") {
+              if (!result.value.skipped) {
+                replies.push({ from: targets[i], text: result.value.text, timedOut: result.value.timedOut });
+              } else {
+                replies.push({ from: targets[i], text: result.value.reason ?? result.value.text, timedOut: false });
+              }
+            } else {
+              replies.push({ from: targets[i], text: getErrorMessage(result.reason), timedOut: false });
+            }
+          }
+
+          const replyLines = replies.map(r => {
+            if (r.timedOut) return `- ${r.from}: ⏱ timed out`;
+            if (!r.text) return `- ${r.from}: ✗ ${r.text || "no reply"}`;
+            return `- ${r.from}: ${r.text}`;
+          });
+
+          pi.appendEntry("intercom_ask_many", {
+            targets,
+            message: { text: message },
+            replies,
+            timestamp: Date.now(),
+          });
+
+          return {
+            content: [{ type: "text", text: `**ask_many replies:**\n${replyLines.join("\n")}` }],
+            isError: false,
+            details: { replies },
+          };
         }
 
         default:

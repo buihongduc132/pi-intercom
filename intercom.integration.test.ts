@@ -532,7 +532,7 @@ test("queued inbound messages are discarded after shutdown", { concurrency: fals
   }
 });
 
-test("busy non-interactive sessions auto-reply to top-level asks without aborting", { concurrency: false }, async () => {
+test("busy non-interactive sessions auto-reply to fire-and-forget messages without aborting", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
   let abortCount = 0;
@@ -548,17 +548,16 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
 
     const target = await waitForSessionByName(planner, "pipe-worker");
 
-    const askId = "pipe-mode-ask";
-    const replyPromise = waitForReply(planner, askId, 1000);
+    const msgId = "pipe-mode-msg";
+    const replyPromise = waitForReply(planner, msgId, 1000);
     const delivered = await planner.send(target.id, {
-      messageId: askId,
+      messageId: msgId,
       text: "Can you respond while busy?",
-      expectsReply: true,
     });
     assert.equal(delivered.delivered, true);
 
     const reply = await replyPromise;
-    assert.equal(reply.message.replyTo, askId);
+    assert.equal(reply.message.replyTo, msgId);
     assert.match(reply.message.content.text, /non-interactive|cannot respond/i);
     assert.equal(abortCount, 0);
 
@@ -965,5 +964,54 @@ test("async ask can be replied to later from the single pending ask fallback", {
     assert.equal(reply.message.replyTo, askId);
   } finally {
     await cleanup();
+  }
+});
+
+test("prefix ID matching resolves unique prefixes and rejects ambiguous ones", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = spawn("npx", ["--no-install", "tsx", path.join(repoDir, "broker", "broker.ts")], {
+    cwd: repoDir,
+    env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  await waitForBrokerReady(broker);
+
+  try {
+    const clientA = new IntercomClient();
+    const clientB = new IntercomClient();
+    const clientC = new IntercomClient();
+
+    await clientA.connect({ name: "prefix-a", cwd: repoDir, model: "test", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    await clientB.connect({ name: "prefix-b", cwd: repoDir, model: "test", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    await clientC.connect({ name: "prefix-c", cwd: repoDir, model: "test", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+
+    const idA = clientA.sessionId!;
+    const idB = clientB.sessionId!;
+
+    // Unique prefix (8 chars) should resolve to exactly one session
+    const prefixA = idA.slice(0, 8);
+    const sendResult = await clientC.send(prefixA, { text: "hello via prefix" });
+    assert.equal(sendResult.delivered, true);
+
+    // Exact full ID still works
+    const exactResult = await clientC.send(idB, { text: "hello via exact id" });
+    assert.equal(exactResult.delivered, true);
+
+    // Name match still works as fallback
+    const nameResult = await clientC.send("prefix-a", { text: "hello via name" });
+    assert.equal(nameResult.delivered, true);
+
+    // Non-existent prefix falls through to name match (and fails)
+    const notFoundResult = await clientC.send("deadbeef", { text: "should fail" });
+    assert.equal(notFoundResult.delivered, false);
+    assert.match(notFoundResult.reason ?? "", /Session not found/);
+
+    await clientA.disconnect();
+    await clientB.disconnect();
+    await clientC.disconnect();
+  } finally {
+    broker.kill("SIGTERM");
+    await once(broker, "exit").catch(() => undefined);
   }
 });

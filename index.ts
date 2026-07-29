@@ -1372,6 +1372,9 @@ Usage:
       targets: Type.Optional(Type.Array(Type.String(), {
         description: "Target session names or IDs (for 'ask_many' scatter-gather)",
       })),
+      expectsReply: Type.Optional(Type.Boolean({
+        description: "When true on 'send', marks message as expecting a reply (visible in receiver's pending list)",
+      })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1388,7 +1391,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo } = params;
+      const { action, to, message, attachments, replyTo, expectsReply } = params;
 
       switch (action) {
         case "list": {
@@ -1458,6 +1461,7 @@ Usage:
               text: message,
               attachments,
               replyTo,
+              expectsReply: expectsReply === true ? true : undefined,
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";

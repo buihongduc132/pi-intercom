@@ -296,7 +296,8 @@ class IntercomBroker {
       }
 
       default:
-        throw new Error(`Unknown client message type: ${clientMessage.type}`);
+        console.log(`Ignoring unknown client message type: ${clientMessage.type}`);
+        break;
     }
   }
 

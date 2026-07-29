@@ -156,8 +156,8 @@ This works because `reply` resolves the correct sender and message ID automatica
 
 | Type | What it means | How to respond |
 |------|---------------|----------------|
-| `need_decision` | Subagent is blocked and waiting for your answer. Has a 10-minute timeout. | Reply promptly with a clear decision. If you need more context, ask follow-up questions via `reply`. |
-| `interview_request` | Subagent needs multiple structured answers in one blocking exchange. Has a 10-minute timeout. | Reply with plain JSON or a fenced `json` block using the provided `{ "responses": [...] }` shape. |
+| `need_decision` | Subagent is blocked and waiting for your answer. Has a 60-minute timeout. | Reply promptly with a clear decision. If you need more context, ask follow-up questions via `reply`. |
+| `interview_request` | Subagent needs multiple structured answers in one blocking exchange. Has a 60-minute timeout. | Reply with plain JSON or a fenced `json` block using the provided `{ "responses": [...] }` shape. |
 | `progress_update` | Subagent is sharing meaningful progress or a plan-changing discovery. Not blocking. | Read and acknowledge. No reply required unless you want to redirect. |
 
 **When a subagent asks:**
@@ -197,7 +197,7 @@ it as a `contact_supervisor` escalation.
 | Action | Behavior | Use When |
 |--------|----------|----------|
 | `send` | Fire-and-forget | You don't need a response |
-| `ask` | Blocks until reply (10 min timeout) | You need an answer to continue |
+| `ask` | Blocks until reply (60 min timeout) | You need an answer to continue |
 | `reply` | Responds to the active or pending inbound ask | You were asked something and need to answer naturally |
 | `pending` | Lists unresolved inbound asks | You need to see who is waiting before replying |
 | `list` | Returns all sessions with live status | You need to discover targets or choose an idle peer |
@@ -301,7 +301,7 @@ If neither `cmux` nor `tmux` is available, skip this path and use normal `interc
 
 ### `ask` Limitations
 
-- **10-minute timeout**: If no reply comes within 10 minutes, the ask fails
+- **60-minute timeout**: If no reply comes within 60 minutes, the ask fails
 - **One at a time**: Cannot have multiple pending asks from the same session
 - **Cannot self-target**: A session cannot ask itself
 
@@ -403,10 +403,10 @@ if (!result.delivered) {
 }
 ```
 
-**Ask timeout (after 10 minutes)**
+**Ask timeout (after 60 minutes)**
 ```typescript
 // The ask will reject with a timeout error
-// Design your workflow so answers come within 10 minutes
+// Design your workflow so answers come within 60 minutes
 // For longer tasks, use send + follow-up ask pattern
 ```
 
@@ -490,7 +490,7 @@ intercom({ action: "send", to: "planner", message: "Task-3 complete. All done." 
 ### Long-Running Task with Checkpoints
 
 ```typescript
-// For tasks that might exceed 10 minutes, use send + periodic asks
+// For tasks that might exceed 60 minutes, use send + periodic asks
 
 // 1. Initial send with full context
 intercom({

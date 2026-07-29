@@ -408,7 +408,8 @@ export class IntercomClient extends EventEmitter {
       }
 
       default:
-        throw new Error(`Unknown broker message type: ${brokerMessage.type}`);
+        // Ignore unknown message types for forward compatibility
+        break;
     }
   }
 
